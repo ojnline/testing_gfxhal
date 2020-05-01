@@ -68,8 +68,7 @@ struct BodyData {
 }
 
 struct Attractor {
-    mass: f32,
-    position: TranformationSource
+    mass: f32
 }
 
 enum Direction {
@@ -192,8 +191,6 @@ struct Application<B: Backend> {
     universe: Universe,
     world: World,
     fallback_model: Model,
-
-    attractors: Vec<Attractor>,
 
     last_step: std::time::Instant,
     geometrical_world: np::world::DefaultGeometricalWorld<f32>,
@@ -655,7 +652,7 @@ impl<B: Backend> Application<B> {
         drop(device_ref);
         let mut manager = mngr::ResourceManager::new(Rc::clone(&device), heaps, Default::default());
         // let _lucy = manager.load_obj(std::path::Path::new("assets/models/lucy.obj")).unwrap();
-        let bunny = manager.load_obj(std::path::Path::new("assets/models/bunny.obj")).unwrap();
+        let bunny = manager.load_obj(std::path::Path::new("assets/models/sphere.obj")).unwrap();
         // let _ball = manager.load_obj(std::path::Path::new("assets/models/sphere.obj")).unwrap();
         manager.flush_transfers();
         
@@ -678,7 +675,7 @@ impl<B: Backend> Application<B> {
         collider_set.insert(co);
 
         let model = |handle: mngr::AssetId| {
-            Model{handle: handle.clone(), scale: 1.}
+            Model{handle: handle.clone(), scale: 0.3}
         };
 
         let bunny_model = model(bunny);
@@ -686,14 +683,10 @@ impl<B: Backend> Application<B> {
         world.insert(
             (),
             body_set.iter().map(|body| {
-                (Transformation(TranformationSource::PhysicsBody(body.0)), bunny_model)
+                (TranformationSource::PhysicsBody(body.0), bunny_model, Attractor{mass: 20.})
             }
             )
         );
-
-        let attractors = vec![
-            Attractor{mass: 20., position: TranformationSource::Static(na::Isometry3::identity())}
-        ];
 
         Self {
             backend,
@@ -723,9 +716,6 @@ impl<B: Backend> Application<B> {
             resource_manager: manager,
             universe,
             world,
-
-            // TODO put into legion
-            attractors,
 
             last_step: std::time::Instant::now(),
             geometrical_world,
@@ -857,7 +847,7 @@ impl<B: Backend> Application<B> {
                 hal::command::SubpassContents::Inline,
             );
             
-            let draw_query = <(Read<Transformation>, Read<Model>)>::query();
+            let draw_query = <(Read<TranformationSource>, Read<Model>)>::query();
 
             for (transformation, model) in draw_query.iter(&mut self.world) {
                 let mesh = self.resource_manager.get_asset(&model.handle).unwrap();
@@ -865,8 +855,8 @@ impl<B: Backend> Application<B> {
                 if let mngr::Asset::Mesh{vertices, indices, vertex_size, index_size, ..} = mesh {
                     
                     let mut push_constants: PushConstants = std::mem::MaybeUninit::zeroed().assume_init();
-                    push_constants.scale = 1.;
-                    push_constants.isometry = match transformation.0 {
+                    push_constants.scale = model.scale;
+                    push_constants.isometry = match *transformation {
                         TranformationSource::Static(isometry) => isometry,
                         TranformationSource::PhysicsBody(handle) => self.body_set.get(handle).unwrap().part(0).unwrap().position(),
                     };
@@ -978,52 +968,53 @@ impl<B: Backend> Application<B> {
             
             self.last_step += std::time::Duration::from_secs_f32(timestep);
             
-            // self.camera.update(timestep, &self.keys);
-
+            let attractor_query = <(Read<TranformationSource>, Read<Attractor>)>::query();
             // some processing is needed so this is done outside the big loop
             // FIXME is this necessary or worth it? Possible compiler magic
-            let mut attractor_data: Vec<(Vec3, f32)> = Vec::with_capacity(self.attractors.len());
+            let attractors = attractor_query.iter_entities(&mut self.world);
             // iterate through the attractors and if one's body has been removed remove it too
             
             // why is the borrow checker so mean
             let body_set = &self.body_set;
 
-            self.attractors.retain(|attractor|
-                match attractor.position {
+            let mut attractor_data: Vec<(Option<np::object::DefaultBodyHandle>, Vec3, f32)> = Vec::new();
+            let mut delete_attractors = Vec::new();
+
+            attractors.for_each(|(entity, (transformation, attractor))|
+                match *transformation {
                     TranformationSource::Static(pos) => {
-                        attractor_data.push((pos.translation.vector, attractor.mass));
-                        true
+                        attractor_data.push((None, pos.translation.vector, attractor.mass));
                     },
                     TranformationSource::PhysicsBody(handle) => {
-                        if let Some(collider) = body_set.get(handle) {
-                            attractor_data.push((collider.part(0).unwrap().position().translation.vector, attractor.mass));
-                            true
+                        if let Some(body) = body_set.get(handle) {
+                            attractor_data.push((Some(handle), body.part(0).unwrap().position().translation.vector, attractor.mass));
                         } else {
-                            false
+                            delete_attractors.push(entity);
                         }
                     }
                 }
             );
             
-            // :(
-            let body_set = &mut self.body_set;
+            delete_attractors.iter().for_each(|attractor_entity| {
+                self.world.delete(*attractor_entity);
+            });
 
-            self.collider_set.iter().for_each(|(_, collider)| {
-                let body_position = collider.position().translation.vector;
+            self.body_set.iter_mut().for_each(|(body_handle, body)| {
+                let body_position = body.part(0).unwrap().position().translation.vector;
                 
-                let force: Vec3 = attractor_data.iter().map(|(position, mass)|{
-                    let direction = body_position-position;
-                    let length = (position-body_position).magnitude();
-                    let acceleration = -mass/length*length*length;
-                    timestep*direction*acceleration
+                let force: Vec3 = attractor_data.iter().map(|(attractor_handle, position, mass)|{
+                    if Some(body_handle) == *attractor_handle {
+                        Vec3::zeros()
+                    } else {
+                        let direction = body_position-position;
+                        let length = (position-body_position).magnitude();
+                        let acceleration = -mass/length*length*length;
+                        timestep*direction*acceleration
+                    }
                 }).sum();
 
-                if force.column_sum()[0].abs() > 0.1 {
-                    use np::math::{ForceType, Force};
-                    if let Some(body) = body_set.get_mut(collider.body()) {
-                        body.apply_local_force(0, &Force::linear(force), ForceType::AccelerationChange, true);
-                    }
-                }
+                use np::math::{ForceType, Force};
+                body.apply_local_force(0, &Force::linear(force), ForceType::AccelerationChange, true);
             });
             
             self.mechanical_world.step(
@@ -1069,6 +1060,7 @@ fn main() {
         .with_inner_size(logical_window_size);
 
     let backend: BackendState<back::Backend> = BackendState::new(wb, &event_loop, "healp");
+    backend.window.set_cursor_visible(false);
     let mut app = Application::new(backend);
 
     println!("");
@@ -1110,7 +1102,7 @@ fn main() {
 
                         app.world.insert(
                             (), 
-                            std::iter::once((Transformation(TranformationSource::PhysicsBody(rb_handle)), app.fallback_model))
+                            std::iter::once((TranformationSource::PhysicsBody(rb_handle), app.fallback_model, Attractor{mass: 5.}))
                         );
                     }
                 }
