@@ -16,3 +16,5 @@ Cargo.lock
 *.obj
 # glory to the stanford bunny!
 !bunny.obj
+
+./*.spv
