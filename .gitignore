@@ -10,7 +10,7 @@ Cargo.lock
 **/*.rs.bk
 
 # models are cached with serde so they don't have to be parsed every time
-.asset_cache
+/.asset_cache
 
 # models are large
-*.obj
+**/*.obj
