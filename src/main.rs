@@ -977,17 +977,17 @@ impl<B: Backend> Application<B> {
             // why is the borrow checker so mean
             let body_set = &self.body_set;
 
-            let mut attractor_data: Vec<(Option<np::object::DefaultBodyHandle>, Vec3, f32)> = Vec::new();
+            let mut attractor_data: Vec<(Vec3, f32)> = Vec::new();
             let mut delete_attractors = Vec::new();
 
             attractors.for_each(|(entity, (transformation, attractor))|
                 match *transformation {
                     TranformationSource::Static(pos) => {
-                        attractor_data.push((None, pos.translation.vector, attractor.mass));
+                        attractor_data.push((pos.translation.vector, attractor.mass));
                     },
                     TranformationSource::PhysicsBody(handle) => {
                         if let Some(body) = body_set.get(handle) {
-                            attractor_data.push((Some(handle), body.part(0).unwrap().position().translation.vector, attractor.mass));
+                            attractor_data.push((body.part(0).unwrap().position().translation.vector, attractor.mass));
                         } else {
                             delete_attractors.push(entity);
                         }
@@ -999,22 +999,22 @@ impl<B: Backend> Application<B> {
                 self.world.delete(*attractor_entity);
             });
 
-            self.body_set.iter_mut().for_each(|(body_handle, body)| {
+            self.body_set.iter_mut().for_each(|(_, body)| {
                 let body_position = body.part(0).unwrap().position().translation.vector;
                 
-                let force: Vec3 = attractor_data.iter().map(|(attractor_handle, position, mass)|{
-                    if Some(body_handle) == *attractor_handle {
+                let force: Vec3 = attractor_data.iter().map(|(position, mass)|{
+                    if body_position == *position {
                         Vec3::zeros()
                     } else {
-                        let direction = body_position-position;
+                        let direction = position-body_position;
                         let length = (position-body_position).magnitude();
-                        let acceleration = -mass/length*length*length;
+                        let acceleration = mass/length*length*length;
                         timestep*direction*acceleration
                     }
                 }).sum();
 
                 use np::math::{ForceType, Force};
-                body.apply_local_force(0, &Force::linear(force), ForceType::AccelerationChange, true);
+                body.apply_force(0, &Force::linear(force), ForceType::AccelerationChange, true);
             });
             
             self.mechanical_world.step(
@@ -1063,7 +1063,6 @@ fn main() {
     backend.window.set_cursor_visible(false);
     let mut app = Application::new(backend);
 
-    println!("");
     event_loop.run(move |event, _, control_flow| {
         use winit::event::{Event, WindowEvent, ElementState, MouseButton};
         use winit::event_loop::ControlFlow;
@@ -1102,7 +1101,7 @@ fn main() {
 
                         app.world.insert(
                             (), 
-                            std::iter::once((TranformationSource::PhysicsBody(rb_handle), app.fallback_model, Attractor{mass: 5.}))
+                            std::iter::once((TranformationSource::PhysicsBody(rb_handle), app.fallback_model, Attractor{mass: 0.}))
                         );
                     }
                 }
