@@ -260,9 +260,9 @@ impl<'a, B: Backend> ResourceManager<B> {
             let reader = BufReader::new(File::open(obj_file).unwrap());
             log::trace!("Started the caching of {} @ {} kb", 
                 obj_file.file_name().unwrap().to_string_lossy(), 
-                reader.buffer().len() as f32 / 1000. // size in megabytes
+                reader.buffer().len() as f32 / 1000.
             );
-            let obj = tobj::load_obj(&obj_file);
+            let obj = tobj::load_obj(&obj_file, true);
 
             let mut vertices = Vec::new();
             let mut indices = Vec::new();
@@ -421,17 +421,17 @@ impl<'a, B: Backend> ResourceManager<B> {
             
             unsafe {
                 use c::CommandBuffer;
-                let barrier = m::Barrier::Buffer {
-                  states: b::State::HOST_WRITE..b::State::MEMORY_READ,
-                  families: None,
-                  range: b::SubRange::WHOLE,
-                  target: &buffer.buffer
-                };
-                self.command_buffer.pipeline_barrier(
-                    pso::PipelineStage::BOTTOM_OF_PIPE..pso::PipelineStage::TOP_OF_PIPE,
-                    m::Dependencies::all(),
-                    std::iter::once(&barrier)
-                );
+                // let barrier = m::Barrier::Buffer {
+                //   states: b::State::HOST_WRITE..b::State::MEMORY_READ,
+                //   families: None,
+                //   range: b::SubRange::WHOLE,
+                //   target: &buffer.buffer
+                // };
+                // self.command_buffer.pipeline_barrier(
+                //     pso::PipelineStage::BOTTOM_OF_PIPE..pso::PipelineStage::TOP_OF_PIPE,
+                //     m::Dependencies::all(),
+                //     std::iter::once(&barrier)
+                // );
                 self.command_buffer.copy_buffer(&self.staging_buffer.buffer, &buffer.buffer, std::iter::once(&buffer_copy));
             }
             

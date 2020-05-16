@@ -3,6 +3,7 @@ mod util;
 mod asset_manager;
 use asset_manager as mngr;
 mod common;
+//mod render_graph;
 
 use gfx_memory as gfxm;
 use gfx_hal::{
@@ -30,6 +31,8 @@ use np::object::{
     ColliderDesc, Ground, BodyPartHandle, RigidBodyDesc
 }; 
 use np::material::{MaterialHandle, BasicMaterial};
+
+#[macro_use] extern crate microprofile;
 
 #[cfg(feature = "dx11")]
 extern crate gfx_backend_dx11 as back;
@@ -182,6 +185,7 @@ struct Application<B: Backend> {
     post_render_pass: ManuallyDrop<B::RenderPass>,
     viewport: pso::Viewport,
 
+    is_focused: bool,
     last_update: std::time::Instant,
     frame_samples: u32,
     frametime_acc: f32,
@@ -244,7 +248,7 @@ impl<B: Backend> Application<B> {
                 samples: 1,
                 ops: AttachmentOps::new(AttachmentLoadOp::Clear, AttachmentStoreOp::Store),
                 stencil_ops: AttachmentOps::DONT_CARE,
-                layouts: Layout::Undefined..Layout::ColorAttachmentOptimal,
+                layouts: Layout::Undefined..Layout::Present,
             };
 
             let depth_attachment = Attachment {
@@ -651,8 +655,8 @@ impl<B: Backend> Application<B> {
         let heaps = unsafe {gfxm::Heaps::new(&device_ref.memory_properties, general_config, linear_config, device_ref.limits.non_coherent_atom_size as u64)};
         drop(device_ref);
         let mut manager = mngr::ResourceManager::new(Rc::clone(&device), heaps, Default::default());
-        // let _lucy = manager.load_obj(std::path::Path::new("assets/models/lucy.obj")).unwrap();
-        let bunny = manager.load_obj(std::path::Path::new("assets/models/sphere.obj")).unwrap();
+        let lucy = manager.load_obj(std::path::Path::new("assets/models/lucy.obj")).unwrap();
+        let bunny = manager.load_obj(std::path::Path::new("assets/models/bunny.obj")).unwrap();
         // let _ball = manager.load_obj(std::path::Path::new("assets/models/sphere.obj")).unwrap();
         manager.flush_transfers();
         
@@ -675,15 +679,16 @@ impl<B: Backend> Application<B> {
         collider_set.insert(co);
 
         let model = |handle: mngr::AssetId| {
-            Model{handle: handle.clone(), scale: 0.3}
+            Model{handle: handle.clone(), scale: 1.}
         };
 
         let bunny_model = model(bunny);
+        let lucy_model = model(lucy);
 
         world.insert(
             (),
             body_set.iter().map(|body| {
-                (TranformationSource::PhysicsBody(body.0), bunny_model, Attractor{mass: 20.})
+                (TranformationSource::PhysicsBody(body.0), lucy_model, Attractor{mass: 20.})
             }
             )
         );
@@ -704,6 +709,8 @@ impl<B: Backend> Application<B> {
             post_pipeline: ManuallyDrop::new(post_pipeline),
             viewport,
             extent,
+
+            is_focused: true,
             last_update: std::time::Instant::now(),
             frame_samples: 0,
             frametime_acc: 0.,
@@ -949,6 +956,8 @@ impl<B: Backend> Application<B> {
         }
     }
     fn update(&mut self) {
+        microprofile::scope!("main", "update");
+
         let delta = self.last_update.elapsed().as_secs_f32();
         self.frametime_acc += delta;
         self.frame_samples += 1;
@@ -962,9 +971,12 @@ impl<B: Backend> Application<B> {
 
         self.last_update = std::time::Instant::now();
         self.camera.update(delta, &self.keys);
-        
+
         let timestep = self.mechanical_world.timestep();
+        
         if self.last_step.elapsed().as_secs_f32() > timestep {
+        
+            microprofile::scope!("main", "attractors");
             
             self.last_step += std::time::Duration::from_secs_f32(timestep);
             
@@ -1016,7 +1028,8 @@ impl<B: Backend> Application<B> {
                 use np::math::{ForceType, Force};
                 body.apply_force(0, &Force::linear(force), ForceType::AccelerationChange, true);
             });
-            
+            microprofile::scope!("main", "physics_update");
+
             self.mechanical_world.step(
                 &mut self.geometrical_world,
                 &mut self.body_set,
@@ -1024,7 +1037,10 @@ impl<B: Backend> Application<B> {
                 &mut self.constraint_set,
                 &mut self.force_generator_set
             );
+            
         }
+
+        microprofile::flip!();
     }
 }
 
@@ -1049,7 +1065,10 @@ impl<B: Backend> Drop for Application<B> {
     }
 }
 fn main() {
-    simple_logger::init_with_level(log::Level::Info).unwrap();
+    microprofile::init();
+	microprofile::set_enable_all_groups(true);
+
+    simple_logger::init_with_level(log::Level::Warn).unwrap();
 
     let event_loop = winit::event_loop::EventLoop::new();
 
@@ -1061,6 +1080,7 @@ fn main() {
 
     let backend: BackendState<back::Backend> = BackendState::new(wb, &event_loop, "healp");
     backend.window.set_cursor_visible(false);
+    backend.window.set_cursor_grab(true);
     let mut app = Application::new(backend);
 
     event_loop.run(move |event, _, control_flow| {
@@ -1079,6 +1099,7 @@ fn main() {
                     app.camera.aspect = dims.width as f32 / dims.height as f32;
                     app.recreate_swapchain = true;
                 },
+                WindowEvent::Focused(focus) => app.is_focused = focus,
                 WindowEvent::MouseInput {
                     state,
                     button,
@@ -1121,6 +1142,8 @@ fn main() {
                             app.camera.pitch = 0.;
                             app.camera.yaw = 0.;
                         },
+                        Some(Escape) => *control_flow = winit::event_loop::ControlFlow::Exit,
+                        Some(T) => microprofile::dump_file_immediately("profiling_dump.html", ""),
                         _ => {}
                     }
                 }
@@ -1128,9 +1151,11 @@ fn main() {
             },
             Event::DeviceEvent { event, .. } => match event {
                 winit::event::DeviceEvent::MouseMotion { delta } => {
-                    app.camera.yaw += (delta.0 * 0.0015) as f32;
-                    app.camera.pitch -= (delta.1 * 0.0015) as f32;
-                    app.camera.pitch = app.camera.pitch.min(1.57).max(-1.57);
+                    if app.is_focused {
+                        app.camera.yaw += (delta.0 * 0.0015) as f32;
+                        app.camera.pitch -= (delta.1 * 0.0015) as f32;
+                        app.camera.pitch = app.camera.pitch.min(1.57).max(-1.57);
+                    }
                 }
                 _ => {}
             },
@@ -1143,5 +1168,8 @@ fn main() {
             }
             _ => (),
         }
+
     });
+
+    microprofile::shutdown();
 }
